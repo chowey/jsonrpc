@@ -1,5 +1,7 @@
 # JSON-RPC
 
+[![GoDoc](https://godoc.org/github.com/chowey/jsonrpc?status.svg)](https://godoc.org/github.com/chowey/jsonrpc)
+
 Standards-compliant JSON-RPC for go.
 
 ## How to use

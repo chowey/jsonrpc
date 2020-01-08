@@ -92,13 +92,17 @@ func NewHandler() *Handler {
 // Register a method with the given name. Methods must be valid functions and
 // have the following restrictions/features:
 //
-// - If the first parameter in the method is a context.Context, then it will be
-//   passed the context from the request.
-// - If the last return value in the method is an error, then this will be
-//   returned as a JSONRPC error.
-// - Input parameters will be unmarshaled as JSON.
-// - If there is a non-error return value, it will be marshaled as JSON.
-// - It is not allowed to have more than one non-error return values.
+// If the first parameter in the method is a context.Context, then it will be
+// passed the context from the request.
+//
+// If the last return value in the method is an error, then this will be
+// returned as a JSONRPC error.
+//
+// Input parameters will be unmarshaled as JSON.
+//
+// If there is a non-error return value, it will be marshaled as JSON.
+//
+// It is not allowed to have more than one non-error return values.
 func (h *Handler) Register(name string, fn interface{}) error {
 	m, err := newMethod(name, fn)
 	if err != nil {
@@ -108,7 +112,7 @@ func (h *Handler) Register(name string, fn interface{}) error {
 	return nil
 }
 
-// RegisterMany is a convenience function. It will call `Register` on each
+// RegisterMany is a convenience function. It will call Register on each
 // key/value pair of the map. If it encounters an error, it will stop
 // and return that error.
 func (h *Handler) RegisterMany(many map[string]interface{}) error {
