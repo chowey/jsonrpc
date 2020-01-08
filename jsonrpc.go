@@ -1,3 +1,53 @@
+/*
+Package jsonrpc implements the JSON-RPC 2.0 specification over HTTP.
+
+Regular functions can be registered to a Handler and then called using
+standard JSON-RPC 2.0 semantics. The only limitations on functions are as
+follows:
+
+	- the first parameter may be a context.Context
+	- the remaining parameters must be able to unmarshal from JSON
+	- return values must be (optionally) a value and (optionally) an error
+	- if there is a return value, it must be able to marshal as JSON
+
+Here is a simple example of a JSON-RPC 2.0 command that echos its input:
+
+	h := jsonrpc.NewHandler()
+	h.RegisterMethod("echo", func (in string) string { return in })
+	http.ListenAndServe(":8080", h)
+
+You would call this over HTTP with standard JSON-RPC 2.0 semantics:
+
+	=> {"jsonrpc": "2.0", "id": 1, "method": "echo", "params": ["Hello world!"]}
+	<= {"jsonrpc": "2.0", "id": 1, "result": "Hello world!"}
+
+As a convenience, structs may also be registered to a Handler. In this case,
+each method of the struct is registered using the method "Type.Method".
+For example:
+
+	type Echo struct{}
+
+	func (Echo) Echo(s string) string {
+		return s
+	}
+
+	func main() {
+		e := &Echo{}
+		h := jsonrpc.NewHandler()
+		h.Register(e)
+		http.ListenAndServe(":8080", h)
+	}
+
+Then you would call this over HTTP as follows:
+
+	=> {"jsonrpc": "2.0", "id": 1, "method": "Echo.Echo", "params": ["Hello world!"]}
+	<= {"jsonrpc": "2.0", "id": 1, "result": "Hello world!"}
+
+As a further convenience, you may pass in one or more structs into the
+NewHandler constructor. For example:
+
+	http.ListenAndServe(":8080", jsonrpc.NewHandler(&Echo{}))
+*/
 package jsonrpc
 
 import (
@@ -10,7 +60,7 @@ import (
 	"reflect"
 )
 
-// JSONRPC reserved status codes.
+// JSON-RPC 2.0 reserved status codes.
 const (
 	StatusParseError     = -32700 // Invalid JSON was received by the server. An error occurred on the server while parsing the JSON text.
 	StatusInvalidRequest = -32600 // The JSON sent is not a valid Request object.
@@ -30,7 +80,7 @@ func (m jsonrpcID) MarshalJSON() ([]byte, error) {
 
 func (m *jsonrpcID) UnmarshalJSON(data []byte) error {
 	if m == nil {
-		return errors.New("jsonrpcID: UnmarshalJSON on nil pointer")
+		return errors.New("id: UnmarshalJSON on nil pointer")
 	}
 
 	// Verify that data is either a string or a number.
@@ -66,9 +116,8 @@ type response struct {
 	Error    *Error      `json:"error,omitempty"`
 }
 
-// Error represents a JSONRPC error. If an Error is returned from a registered
-// function, it will be sent directly to the client. Otherwise a generic Error
-// is created.
+// Error represents a JSON-RPC 2.0 error. If an Error is returned from a
+// registered function, it will be sent directly to the client.
 type Error struct {
 	Code    int         `json:"code"`
 	Message string      `json:"message"`
@@ -79,49 +128,54 @@ func (err *Error) Error() string {
 	return err.Message
 }
 
-// Handler is an http.Handler that responds to JSONRPC requests.
+// Handler is an http.Handler that responds to JSON-RPC 2.0 requests.
 type Handler struct {
 	registry map[string]*method
 }
 
-// NewHandler initializes a new Handler.
-func NewHandler() *Handler {
-	return &Handler{registry: make(map[string]*method)}
+// NewHandler initializes a new Handler. If receivers are provided, they will
+// be registered.
+func NewHandler(rcvrs ...interface{}) *Handler {
+	h := &Handler{registry: make(map[string]*method)}
+	for _, rcvr := range rcvrs {
+		h.Register(rcvr)
+	}
+	return h
 }
 
-// Register a method with the given name. Methods must be valid functions and
-// have the following restrictions/features:
+// RegisterMethod registers a method under the given name. Methods must be valid
+// functions with the following restrictions:
 //
-// If the first parameter in the method is a context.Context, then it will be
-// passed the context from the request.
+//     - the first parameter may be a context.Context
+//     - the remaining parameters must be able to unmarshal from JSON
+//     - return values must be (optionally) a value and (optionally) an error
+//     - if there is a return value, it must be able to marshal as JSON
 //
-// If the last return value in the method is an error, then this will be
-// returned as a JSONRPC error.
-//
-// Input parameters will be unmarshaled as JSON.
-//
-// If there is a non-error return value, it will be marshaled as JSON.
-//
-// It is not allowed to have more than one non-error return values.
-func (h *Handler) Register(name string, fn interface{}) error {
+// If the first parameter is a context.Context, then it will receive the context
+// from the HTTP request.
+func (h *Handler) RegisterMethod(name string, fn interface{}) {
 	m, err := newMethod(name, fn)
 	if err != nil {
-		return err
+		panic(err)
 	}
 	h.registry[name] = m
-	return nil
 }
 
-// RegisterMany is a convenience function. It will call Register on each
-// key/value pair of the map. If it encounters an error, it will stop
-// and return that error.
-func (h *Handler) RegisterMany(many map[string]interface{}) error {
-	for name, fn := range many {
-		if err := h.Register(name, fn); err != nil {
-			return err
+// Register is a convenience function. It will call RegisterMethod on each
+// method of the provided receiver. The registered method name will follow the
+// pattern "Type.Method".
+func (h *Handler) Register(rcvr interface{}) {
+	v := reflect.ValueOf(rcvr)
+	t := reflect.TypeOf(rcvr)
+	name := reflect.Indirect(v).Type().Name()
+	for i := 0; i < t.NumMethod(); i++ {
+		method := t.Method(i)
+		// Method must be exported.
+		if method.PkgPath != "" {
+			continue
 		}
+		h.RegisterMethod(name+"."+method.Name, v.Method(method.Index).Interface())
 	}
-	return nil
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {

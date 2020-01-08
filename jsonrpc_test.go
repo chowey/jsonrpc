@@ -9,29 +9,27 @@ import (
 	"testing"
 )
 
+type Echoer struct{}
+
+func (Echoer) Echo(s string) string {
+	return s
+}
+
 func TestJSONRPC(t *testing.T) {
 	ctx := context.WithValue(context.Background(), "data", "Hello world!")
 
 	// Test some sample methods.
-	h := NewHandler()
+	h := NewHandler(&Echoer{})
 
-	if err := h.Register("echo", func(s string) string {
+	h.RegisterMethod("echo", func(s string) string {
 		return s
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := h.Register("multiecho", func(s ...string) string {
+	})
+	h.RegisterMethod("multiecho", func(s ...string) string {
 		return strings.Join(s, " ")
-	}); err != nil {
-		t.Fatal(err)
-	}
-
-	if err := h.Register("ctx.data", func(ctx context.Context) (string, error) {
+	})
+	h.RegisterMethod("ctx.data", func(ctx context.Context) (string, error) {
 		return ctx.Value("data").(string), nil
-	}); err != nil {
-		t.Fatal(err)
-	}
+	})
 
 	// Prepare test cases.
 	type compare struct {
@@ -42,6 +40,15 @@ func TestJSONRPC(t *testing.T) {
 		{`{
 			"jsonrpc": "2.0",
 			"method": "echo",
+			"params": "Hello world!"
+		}`, `{
+			"jsonrpc": "2.0",
+			"id": null,
+			"result": "Hello world!"
+		}`},
+		{`{
+			"jsonrpc": "2.0",
+			"method": "Echoer.Echo",
 			"params": "Hello world!"
 		}`, `{
 			"jsonrpc": "2.0",
