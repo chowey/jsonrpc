@@ -30,6 +30,11 @@ func TestJSONRPC(t *testing.T) {
 	h.RegisterMethod("ctx.data", func(ctx context.Context) (string, error) {
 		return ctx.Value("data").(string), nil
 	})
+	h.RegisterMethod("nil.error", func() (string, error) {
+		var err *Error
+		return "Hello world!", err
+	})
+	h.RegisterMethod("nil.result", func() {})
 
 	// Prepare test cases.
 	type compare struct {
@@ -74,6 +79,14 @@ func TestJSONRPC(t *testing.T) {
 			"id": 2,
 			"result": "Hello world!"
 		}`},
+		{`{
+			"jsonrpc": "2.0",
+			"method": "nil.result"
+		}`, `{
+			"jsonrpc": "2.0",
+			"id": null,
+			"result": null
+		}`},
 	} {
 		req := httptest.NewRequest("POST", "/", strings.NewReader(c.In))
 		req = req.WithContext(ctx)
@@ -83,6 +96,23 @@ func TestJSONRPC(t *testing.T) {
 		t.Logf("Running test %d", i)
 		expectJSON(t, w.Body, c.Out)
 	}
+
+	(func() {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Fatal("nil *jsonrpc.Error did not panic")
+			}
+		}()
+		req := httptest.NewRequest("POST", "/", strings.NewReader(`{
+			"jsonrpc": "2.0",
+			"id": 3,
+			"method": "nil.error"
+		}`))
+		req = req.WithContext(ctx)
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+	})()
 }
 
 func expectJSON(t *testing.T, in *bytes.Buffer, expected string) {

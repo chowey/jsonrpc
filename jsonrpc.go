@@ -112,8 +112,13 @@ type request struct {
 type response struct {
 	Protocol string      `json:"jsonrpc"`
 	ID       jsonrpcID   `json:"id"`
-	Result   interface{} `json:"result,omitempty"`
-	Error    *Error      `json:"error,omitempty"`
+	Result   interface{} `json:"result"`
+}
+
+type errorResponse struct {
+	Protocol string    `json:"jsonrpc"`
+	ID       jsonrpcID `json:"id"`
+	Error    *Error    `json:"error"`
 }
 
 // Error represents a JSON-RPC 2.0 error. If an Error is returned from a
@@ -198,37 +203,48 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		if _, ok := err.(*json.SyntaxError); ok {
-			res.Error = &Error{
-				Code:    StatusParseError,
-				Message: err.Error(),
-			}
+			json.NewEncoder(w).Encode(errorResponse{
+				Protocol: "2.0",
+				Error: &Error{
+					Code:    StatusParseError,
+					Message: err.Error(),
+				},
+			})
 		} else {
-			res.Error = &Error{
-				Code:    StatusInvalidRequest,
-				Message: err.Error(),
-			}
+			json.NewEncoder(w).Encode(errorResponse{
+				Protocol: "2.0",
+				Error: &Error{
+					Code:    StatusInvalidRequest,
+					Message: err.Error(),
+				},
+			})
 		}
-		json.NewEncoder(w).Encode(res)
 		return
 	}
 	res.ID = req.ID
 
 	if req.Protocol != "2.0" {
-		res.Error = &Error{
-			Code:    StatusInvalidRequest,
-			Message: "Invalid protocol: expected jsonrpc: 2.0",
-		}
-		json.NewEncoder(w).Encode(res)
+		json.NewEncoder(w).Encode(errorResponse{
+			Protocol: "2.0",
+			ID:       req.ID,
+			Error: &Error{
+				Code:    StatusInvalidRequest,
+				Message: "Invalid protocol: expected jsonrpc: 2.0",
+			},
+		})
 		return
 	}
 
 	m, ok := h.registry[req.Method]
 	if !ok {
-		res.Error = &Error{
-			Code:    StatusMethodNotFound,
-			Message: fmt.Sprintf("No such method: %s", req.Method),
-		}
-		json.NewEncoder(w).Encode(res)
+		json.NewEncoder(w).Encode(errorResponse{
+			Protocol: "2.0",
+			ID:       req.ID,
+			Error: &Error{
+				Code:    StatusMethodNotFound,
+				Message: fmt.Sprintf("No such method: %s", req.Method),
+			},
+		})
 		return
 	}
 
@@ -236,15 +252,23 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	result, err := m.call(r.Context(), req.Params)
 	if err != nil {
 		// Check for pre-existing JSONRPC errors.
-		res.Error, ok = err.(*Error)
-		if !ok {
+		if e, ok := err.(*Error); ok && e != nil {
+			json.NewEncoder(w).Encode(errorResponse{
+				Protocol: "2.0",
+				ID:       req.ID,
+				Error:    e,
+			})
+		} else {
 			// Create a generic JSONRPC error.
-			res.Error = &Error{
-				Code:    StatusInternalError,
-				Message: err.Error(),
-			}
+			json.NewEncoder(w).Encode(errorResponse{
+				Protocol: "2.0",
+				ID:       req.ID,
+				Error: &Error{
+					Code:    StatusInternalError,
+					Message: err.Error(),
+				},
+			})
 		}
-		json.NewEncoder(w).Encode(res)
 		return
 	}
 
