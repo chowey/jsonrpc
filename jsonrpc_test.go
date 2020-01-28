@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	alt_json "github.com/helloeave/json"
 )
@@ -16,6 +17,11 @@ import (
 type Echoer struct{}
 
 func (Echoer) Echo(s string) string {
+	return s
+}
+
+func (Echoer) DelayEcho(s string, ms int) string {
+	time.Sleep(time.Duration(ms) * time.Millisecond)
 	return s
 }
 
@@ -203,5 +209,41 @@ func TestAlternateEncoder(t *testing.T) {
 		c.Dest.ServeHTTP(w, req)
 		t.Logf("Running test %d", i)
 		expectJSON(t, w.Body, c.Out)
+	}
+}
+
+func TestBidirectional(t *testing.T) {
+	h := NewHandler(Echoer{})
+
+	var buf bytes.Buffer
+	pr, pw := io.Pipe()
+	stream := struct {
+		io.Reader
+		io.Writer
+	}{pr, &buf}
+
+	go func() {
+		pw.Write([]byte(`{
+			"jsonrpc": "2.0",
+			"id": 1,
+			"method": "Echoer.DelayEcho",
+			"params": ["Hello world!", 200]
+		}`))
+		pw.Write([]byte(`{
+			"jsonrpc": "2.0",
+			"id": 2,
+			"method": "Echoer.DelayEcho",
+			"params": ["Hello world!", 100]
+		}`))
+		pw.Close()
+	}()
+	h.ServeConn(context.Background(), stream)
+
+	got := buf.String()
+	want := `{"jsonrpc":"2.0","id":2,"result":"Hello world!"}
+{"jsonrpc":"2.0","id":1,"result":"Hello world!"}
+`
+	if got != want {
+		t.Fatalf("expected: %s\ngot: %s", want, got)
 	}
 }

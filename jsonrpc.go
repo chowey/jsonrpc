@@ -59,6 +59,7 @@ import (
 	"io"
 	"net/http"
 	"reflect"
+	"sync"
 )
 
 // JSON-RPC 2.0 reserved status codes.
@@ -108,18 +109,42 @@ type request struct {
 	ID       jsonrpcID       `json:"id"`
 	Method   string          `json:"method"`
 	Params   json.RawMessage `json:"params"`
+
+	m *method
+}
+
+func (req *request) call(ctx context.Context) (res response) {
+	res.Protocol = "2.0"
+	res.ID = req.ID
+
+	// Call the method.
+	result, err := req.m.call(ctx, req.Params)
+	if err != nil {
+		// Check for pre-existing JSONRPC errors.
+		if e, ok := err.(*Error); ok && e != nil {
+			res.Error = e
+			return res
+		}
+		// Create a generic JSONRPC error.
+		res.Error = &Error{
+			Code:    StatusInternalError,
+			Message: err.Error(),
+		}
+		return res
+	}
+	res.Result = result
+	return res
 }
 
 type response struct {
-	Protocol string      `json:"jsonrpc"`
-	ID       jsonrpcID   `json:"id"`
-	Result   interface{} `json:"result"`
+	errorResponse
+	Result interface{} `json:"result"`
 }
 
 type errorResponse struct {
 	Protocol string    `json:"jsonrpc"`
 	ID       jsonrpcID `json:"id"`
-	Error    *Error    `json:"error"`
+	Error    *Error    `json:"error,omitempty"`
 }
 
 // Encoder is something that can encode into JSON.
@@ -191,6 +216,58 @@ func (h *Handler) Register(rcvr interface{}) {
 	}
 }
 
+// ServeConn provides JSON-RPC over any bi-directional stream.
+func (h *Handler) ServeConn(ctx context.Context, rw io.ReadWriter) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	var l sync.Mutex
+	var buf bytes.Buffer
+
+	var wg sync.WaitGroup
+	dec := json.NewDecoder(rw)
+	enc := h.newEncoder(&buf)
+	for {
+		req := new(request)
+		e, ok := h.decodeRequest(dec, req)
+		if !ok {
+			// If no more values are available, the reader has closed.
+			wg.Wait()
+			return
+		}
+		if e != nil {
+			if err := enc.Encode(e); err != nil {
+				// If writes fail, the writer is no longer valid.
+				return
+			}
+			continue
+		}
+
+		// Start the call in its own goroutine.
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			res := req.call(ctx)
+
+			// Write the entire buffer as a single write, to help e.g. a
+			// websocket adapter send it as one frame.
+			l.Lock()
+			defer l.Unlock()
+
+			err := enc.Encode(res)
+			if err == nil {
+				_, err = buf.WriteTo(rw)
+				buf.Reset()
+			}
+
+			// If write fails, the writer is no longer valid.
+			if err != nil {
+				cancel()
+			}
+		}()
+	}
+}
+
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Deal with HTTP-level errors.
 	if r.Header.Get("Content-Type") != "application/json" {
@@ -205,84 +282,80 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// All other requests return status OK. Errors are returned as JSONRPC.
 	w.Header().Set("Content-Type", "application/json")
 
-	// Unmarshal the request. We do all the usual checks per the protocol.
-	var req request
-	res := response{Protocol: "2.0"}
+	dec := json.NewDecoder(r.Body)
+	enc := h.newEncoder(w)
 
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	req := new(request)
+	e, ok := h.decodeRequest(dec, req)
+	if !ok {
+		e = &errorResponse{
+			Protocol: "2.0",
+			Error: &Error{
+				Code:    StatusInvalidRequest,
+				Message: io.EOF.Error(),
+			},
+		}
+	}
+	if e != nil {
+		enc.Encode(e)
+		return
+	}
+
+	// Call the method.
+	enc.Encode(req.call(r.Context()))
+}
+
+// Decode a value into the request. If there was an error, the errorResponse
+// will be non-nil. If no more values are available on the decoder, then ok
+// will be false.
+func (h *Handler) decodeRequest(dec *json.Decoder, req *request) (res *errorResponse, ok bool) {
+	// Unmarshal the request. We do all the usual checks per the protocol.
+	if err := dec.Decode(req); err != nil {
+		if err == io.EOF {
+			return nil, false
+		}
 		if _, ok := err.(*json.SyntaxError); ok {
-			h.newEncoder(w).Encode(errorResponse{
+			return &errorResponse{
 				Protocol: "2.0",
 				Error: &Error{
 					Code:    StatusParseError,
 					Message: err.Error(),
 				},
-			})
-		} else {
-			h.newEncoder(w).Encode(errorResponse{
-				Protocol: "2.0",
-				Error: &Error{
-					Code:    StatusInvalidRequest,
-					Message: err.Error(),
-				},
-			})
+			}, true
 		}
-		return
+		return &errorResponse{
+			Protocol: "2.0",
+			Error: &Error{
+				Code:    StatusInvalidRequest,
+				Message: err.Error(),
+			},
+		}, true
 	}
-	res.ID = req.ID
 
 	if req.Protocol != "2.0" {
-		h.newEncoder(w).Encode(errorResponse{
+		return &errorResponse{
 			Protocol: "2.0",
 			ID:       req.ID,
 			Error: &Error{
 				Code:    StatusInvalidRequest,
 				Message: "Invalid protocol: expected jsonrpc: 2.0",
 			},
-		})
-		return
+		}, true
 	}
 
 	m, ok := h.registry[req.Method]
 	if !ok {
-		h.newEncoder(w).Encode(errorResponse{
+		return &errorResponse{
 			Protocol: "2.0",
 			ID:       req.ID,
 			Error: &Error{
 				Code:    StatusMethodNotFound,
 				Message: fmt.Sprintf("No such method: %s", req.Method),
 			},
-		})
-		return
+		}, true
 	}
-
-	// Call the method.
-	result, err := m.call(r.Context(), req.Params)
-	if err != nil {
-		// Check for pre-existing JSONRPC errors.
-		if e, ok := err.(*Error); ok && e != nil {
-			h.newEncoder(w).Encode(errorResponse{
-				Protocol: "2.0",
-				ID:       req.ID,
-				Error:    e,
-			})
-		} else {
-			// Create a generic JSONRPC error.
-			h.newEncoder(w).Encode(errorResponse{
-				Protocol: "2.0",
-				ID:       req.ID,
-				Error: &Error{
-					Code:    StatusInternalError,
-					Message: err.Error(),
-				},
-			})
-		}
-		return
-	}
-
-	// Encode the result.
-	res.Result = result
-	h.newEncoder(w).Encode(res)
+	req.m = m
+	return nil, true
 }
 
 func (h *Handler) newEncoder(w io.Writer) Encoder {
@@ -292,8 +365,8 @@ func (h *Handler) newEncoder(w io.Writer) Encoder {
 	return h.encoderFactory(w)
 }
 
-// Configures what encoder will be loaded for sending JSON-RPC responses.
-// By default the Handler will use json.NewEncoder.
+// SetEncoderFactory configures what encoder will be loaded for sending JSON-RPC
+// responses. By default the Handler will use json.NewEncoder.
 func (h *Handler) SetEncoderFactory(fn func(w io.Writer) Encoder) {
 	h.encoderFactory = fn
 }
