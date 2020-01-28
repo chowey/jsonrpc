@@ -56,6 +56,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"reflect"
 )
@@ -121,6 +122,12 @@ type errorResponse struct {
 	Error    *Error    `json:"error"`
 }
 
+// Encoder is something that can encode into JSON.
+// By default it is a json.Encoder
+type Encoder interface {
+	Encode(v interface{}) error
+}
+
 // Error represents a JSON-RPC 2.0 error. If an Error is returned from a
 // registered function, it will be sent directly to the client.
 type Error struct {
@@ -135,7 +142,8 @@ func (err *Error) Error() string {
 
 // Handler is an http.Handler that responds to JSON-RPC 2.0 requests.
 type Handler struct {
-	registry map[string]*method
+	registry       map[string]*method
+	encoderFactory func(w io.Writer) Encoder
 }
 
 // NewHandler initializes a new Handler. If receivers are provided, they will
@@ -203,7 +211,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		if _, ok := err.(*json.SyntaxError); ok {
-			json.NewEncoder(w).Encode(errorResponse{
+			h.newEncoder(w).Encode(errorResponse{
 				Protocol: "2.0",
 				Error: &Error{
 					Code:    StatusParseError,
@@ -211,7 +219,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				},
 			})
 		} else {
-			json.NewEncoder(w).Encode(errorResponse{
+			h.newEncoder(w).Encode(errorResponse{
 				Protocol: "2.0",
 				Error: &Error{
 					Code:    StatusInvalidRequest,
@@ -224,7 +232,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	res.ID = req.ID
 
 	if req.Protocol != "2.0" {
-		json.NewEncoder(w).Encode(errorResponse{
+		h.newEncoder(w).Encode(errorResponse{
 			Protocol: "2.0",
 			ID:       req.ID,
 			Error: &Error{
@@ -237,7 +245,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	m, ok := h.registry[req.Method]
 	if !ok {
-		json.NewEncoder(w).Encode(errorResponse{
+		h.newEncoder(w).Encode(errorResponse{
 			Protocol: "2.0",
 			ID:       req.ID,
 			Error: &Error{
@@ -253,14 +261,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// Check for pre-existing JSONRPC errors.
 		if e, ok := err.(*Error); ok && e != nil {
-			json.NewEncoder(w).Encode(errorResponse{
+			h.newEncoder(w).Encode(errorResponse{
 				Protocol: "2.0",
 				ID:       req.ID,
 				Error:    e,
 			})
 		} else {
 			// Create a generic JSONRPC error.
-			json.NewEncoder(w).Encode(errorResponse{
+			h.newEncoder(w).Encode(errorResponse{
 				Protocol: "2.0",
 				ID:       req.ID,
 				Error: &Error{
@@ -274,7 +282,20 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Encode the result.
 	res.Result = result
-	json.NewEncoder(w).Encode(res)
+	h.newEncoder(w).Encode(res)
+}
+
+func (h *Handler) newEncoder(w io.Writer) Encoder {
+	if h.encoderFactory == nil {
+		return json.NewEncoder(w)
+	}
+	return h.encoderFactory(w)
+}
+
+// Configures what encoder will be loaded for sending JSON-RPC responses.
+// By default the Handler will use json.NewEncoder.
+func (h *Handler) SetEncoderFactory(fn func(w io.Writer) Encoder) {
+	h.encoderFactory = fn
 }
 
 var (

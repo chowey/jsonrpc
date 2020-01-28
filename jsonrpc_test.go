@@ -4,9 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	alt_json "github.com/helloeave/json"
 )
 
 type Echoer struct{}
@@ -130,5 +134,74 @@ func expectJSON(t *testing.T, in *bytes.Buffer, expected string) {
 
 	if got != want {
 		t.Fatalf("expected: %s\ngot: %s", want, got)
+	}
+}
+
+func TestAlternateEncoder(t *testing.T) {
+
+	type container struct {
+		Slice []string
+	}
+
+	h := NewHandler()
+	h.RegisterMethod("foo", func() container {
+		return container{}
+	})
+
+	h.RegisterMethod("bar", func() container {
+		return container{[]string{"hello", "world"}}
+	})
+
+	h2 := NewHandler()
+	h2.SetEncoderFactory(func(w io.Writer) Encoder {
+		enc := alt_json.NewEncoder(w)
+		enc.SetNilSafeCollection(true)
+		return enc
+	})
+	h2.RegisterMethod("foo", func() container {
+		return container{}
+	})
+
+	// Prepare test cases.
+	type compare struct {
+		In   string
+		Out  string
+		Dest http.Handler
+	}
+	for i, c := range []compare{
+		{`{
+			"jsonrpc": "2.0",
+			"method": "foo",
+			"params": null
+		}`, `{
+			"jsonrpc": "2.0",
+			"id": null,
+			"result": {"Slice": null}
+		}`, h},
+		{`{
+			"jsonrpc": "2.0",
+			"method": "bar",
+			"params": null
+		}`, `{
+			"jsonrpc": "2.0",
+			"id": null,
+			"result": {"Slice": ["hello", "world"]}
+		}`, h},
+		{`{
+			"jsonrpc": "2.0",
+			"method": "foo",
+			"params": null
+		}`, `{
+			"jsonrpc": "2.0",
+			"id": null,
+			"result": {"Slice": []}
+		}`, h2},
+	} {
+		req := httptest.NewRequest("POST", "/", strings.NewReader(c.In))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		c.Dest.ServeHTTP(w, req)
+		t.Logf("Running test %d", i)
+		expectJSON(t, w.Body, c.Out)
 	}
 }
