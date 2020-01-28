@@ -245,7 +245,7 @@ func (h *Handler) ServeConn(ctx context.Context, rw io.ReadWriter) {
 				req.call(ctx)
 			}
 
-			if req.ID == nil {
+			if req.res.ID == nil {
 				return
 			}
 
@@ -291,6 +291,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	var req request
 	if !h.decodeRequest(dec, &req) {
+		req.res.ID = jsonrpcID("null")
 		req.res.errorResponse.Error = &Error{
 			Code:    StatusInvalidRequest,
 			Message: io.EOF.Error(),
@@ -301,7 +302,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		req.call(r.Context())
 	}
 
-	if req.ID == nil {
+	if req.res.ID == nil {
 		w.WriteHeader(http.StatusNoContent)
 	} else {
 		w.Header().Set("Content-Type", "application/json")
@@ -324,6 +325,7 @@ func (h *Handler) decodeRequest(dec *json.Decoder, req *request) bool {
 		if err == io.EOF {
 			return false
 		}
+		req.res.ID = jsonrpcID("null")
 		if _, ok := err.(*json.SyntaxError); ok {
 			req.res.errorResponse.Error = &Error{
 				Code:    StatusParseError,

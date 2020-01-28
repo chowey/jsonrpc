@@ -71,6 +71,15 @@ func TestJSONRPC(t *testing.T) {
 			"id": null,
 			"result": "Hello world!"
 		}`},
+		{``, `{
+			"jsonrpc": "2.0",
+			"id": null,
+			"error": {
+				"code": -32600,
+				"message": "EOF",
+				"data": null
+			}
+		}`},
 		{`{
 			"jsonrpc": "2.0",
 			"method": "Echoer.Echo",
@@ -171,13 +180,13 @@ func expectJSON(t *testing.T, in *bytes.Buffer, expected string) {
 
 	var buf bytes.Buffer
 	if err := json.Compact(&buf, []byte(expected)); err != nil {
-		t.Fatal(err, expected)
+		t.Fatalf("parsing expected: %s\nencountered error: %v", expected, err)
 	}
 	want := buf.String()
 
 	buf.Reset()
 	if err := json.Compact(&buf, in.Bytes()); err != nil {
-		t.Fatal(err, in.String())
+		t.Fatalf("parsing response: %s\nencountered error: %v", in.String(), err)
 	}
 	got := buf.String()
 
