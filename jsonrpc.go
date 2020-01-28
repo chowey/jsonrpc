@@ -110,30 +110,30 @@ type request struct {
 	Method   string          `json:"method"`
 	Params   json.RawMessage `json:"params"`
 
-	m *method
+	res response
+	m   *method
 }
 
-func (req *request) call(ctx context.Context) (res response) {
-	res.Protocol = "2.0"
-	res.ID = req.ID
+func (req *request) call(ctx context.Context) {
+	req.res.Protocol = "2.0"
+	req.res.ID = req.ID
 
 	// Call the method.
 	result, err := req.m.call(ctx, req.Params)
 	if err != nil {
 		// Check for pre-existing JSONRPC errors.
 		if e, ok := err.(*Error); ok && e != nil {
-			res.Error = e
-			return res
+			req.res.Error = e
+			return
 		}
 		// Create a generic JSONRPC error.
-		res.Error = &Error{
+		req.res.Error = &Error{
 			Code:    StatusInternalError,
 			Message: err.Error(),
 		}
-		return res
+		return
 	}
-	res.Result = result
-	return res
+	req.res.Result = result
 }
 
 type response struct {
@@ -229,32 +229,37 @@ func (h *Handler) ServeConn(ctx context.Context, rw io.ReadWriter) {
 	enc := h.newEncoder(&buf)
 	for {
 		req := new(request)
-		e, ok := h.decodeRequest(dec, req)
-		if !ok {
+		if !h.decodeRequest(dec, req) {
 			// If no more values are available, the reader has closed.
 			wg.Wait()
 			return
-		}
-		if e != nil {
-			if err := enc.Encode(e); err != nil {
-				// If writes fail, the writer is no longer valid.
-				return
-			}
-			continue
 		}
 
 		// Start the call in its own goroutine.
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			res := req.call(ctx)
+
+			if req.res.errorResponse.Error == nil {
+				// Call the method.
+				req.call(ctx)
+			}
+
+			if req.ID == nil {
+				return
+			}
 
 			// Write the entire buffer as a single write, to help e.g. a
 			// websocket adapter send it as one frame.
 			l.Lock()
 			defer l.Unlock()
 
-			err := enc.Encode(res)
+			var err error
+			if req.res.errorResponse.Error != nil {
+				err = enc.Encode(req.res.errorResponse)
+			} else {
+				err = enc.Encode(req.res)
+			}
 			if err == nil {
 				_, err = buf.WriteTo(rw)
 				buf.Reset()
@@ -280,82 +285,78 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// All other requests return status OK. Errors are returned as JSONRPC.
-	w.Header().Set("Content-Type", "application/json")
 
 	dec := json.NewDecoder(r.Body)
 	enc := h.newEncoder(w)
 
-	req := new(request)
-	e, ok := h.decodeRequest(dec, req)
-	if !ok {
-		e = &errorResponse{
-			Protocol: "2.0",
-			Error: &Error{
-				Code:    StatusInvalidRequest,
-				Message: io.EOF.Error(),
-			},
+	var req request
+	if !h.decodeRequest(dec, &req) {
+		req.res.errorResponse.Error = &Error{
+			Code:    StatusInvalidRequest,
+			Message: io.EOF.Error(),
 		}
 	}
-	if e != nil {
-		enc.Encode(e)
-		return
+	if req.res.errorResponse.Error == nil {
+		// Call the method.
+		req.call(r.Context())
 	}
 
-	// Call the method.
-	enc.Encode(req.call(r.Context()))
+	if req.ID == nil {
+		w.WriteHeader(http.StatusNoContent)
+	} else {
+		w.Header().Set("Content-Type", "application/json")
+		if req.res.errorResponse.Error != nil {
+			enc.Encode(req.res.errorResponse)
+		} else {
+			enc.Encode(req.res)
+		}
+	}
 }
 
 // Decode a value into the request. If there was an error, the errorResponse
 // will be non-nil. If no more values are available on the decoder, then ok
 // will be false.
-func (h *Handler) decodeRequest(dec *json.Decoder, req *request) (res *errorResponse, ok bool) {
+func (h *Handler) decodeRequest(dec *json.Decoder, req *request) bool {
+	req.res.Protocol = "2.0"
+
 	// Unmarshal the request. We do all the usual checks per the protocol.
 	if err := dec.Decode(req); err != nil {
 		if err == io.EOF {
-			return nil, false
+			return false
 		}
 		if _, ok := err.(*json.SyntaxError); ok {
-			return &errorResponse{
-				Protocol: "2.0",
-				Error: &Error{
-					Code:    StatusParseError,
-					Message: err.Error(),
-				},
-			}, true
-		}
-		return &errorResponse{
-			Protocol: "2.0",
-			Error: &Error{
-				Code:    StatusInvalidRequest,
+			req.res.errorResponse.Error = &Error{
+				Code:    StatusParseError,
 				Message: err.Error(),
-			},
-		}, true
+			}
+			return true
+		}
+		req.res.errorResponse.Error = &Error{
+			Code:    StatusInvalidRequest,
+			Message: err.Error(),
+		}
+		return true
 	}
 
+	req.res.ID = req.ID
 	if req.Protocol != "2.0" {
-		return &errorResponse{
-			Protocol: "2.0",
-			ID:       req.ID,
-			Error: &Error{
-				Code:    StatusInvalidRequest,
-				Message: "Invalid protocol: expected jsonrpc: 2.0",
-			},
-		}, true
+		req.res.errorResponse.Error = &Error{
+			Code:    StatusInvalidRequest,
+			Message: "Invalid protocol: expected jsonrpc: 2.0",
+		}
+		return true
 	}
 
 	m, ok := h.registry[req.Method]
 	if !ok {
-		return &errorResponse{
-			Protocol: "2.0",
-			ID:       req.ID,
-			Error: &Error{
-				Code:    StatusMethodNotFound,
-				Message: fmt.Sprintf("No such method: %s", req.Method),
-			},
-		}, true
+		req.res.errorResponse.Error = &Error{
+			Code:    StatusMethodNotFound,
+			Message: fmt.Sprintf("No such method: %s", req.Method),
+		}
+		return true
 	}
 	req.m = m
-	return nil, true
+	return true
 }
 
 func (h *Handler) newEncoder(w io.Writer) Encoder {

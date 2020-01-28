@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -45,6 +46,9 @@ func TestJSONRPC(t *testing.T) {
 		return "Hello world!", err
 	})
 	h.RegisterMethod("nil.result", func() {})
+	h.RegisterMethod("error", func(s string) error {
+		return errors.New(s)
+	})
 
 	// Prepare test cases.
 	type compare struct {
@@ -56,6 +60,12 @@ func TestJSONRPC(t *testing.T) {
 			"jsonrpc": "2.0",
 			"method": "echo",
 			"params": "Hello world!"
+		}`, ``},
+		{`{
+			"jsonrpc": "2.0",
+			"id": null,
+			"method": "echo",
+			"params": "Hello world!"
 		}`, `{
 			"jsonrpc": "2.0",
 			"id": null,
@@ -63,6 +73,12 @@ func TestJSONRPC(t *testing.T) {
 		}`},
 		{`{
 			"jsonrpc": "2.0",
+			"method": "Echoer.Echo",
+			"params": "Hello world!"
+		}`, ``},
+		{`{
+			"jsonrpc": "2.0",
+			"id": null,
 			"method": "Echoer.Echo",
 			"params": "Hello world!"
 		}`, `{
@@ -92,10 +108,29 @@ func TestJSONRPC(t *testing.T) {
 		{`{
 			"jsonrpc": "2.0",
 			"method": "nil.result"
+		}`, ``},
+		{`{
+			"jsonrpc": "2.0",
+			"id": null,
+			"method": "nil.result"
 		}`, `{
 			"jsonrpc": "2.0",
 			"id": null,
 			"result": null
+		}`},
+		{`{
+			"jsonrpc": "2.0",
+			"id": null,
+			"method": "error",
+			"params": ["custom error"]
+		}`, `{
+			"jsonrpc": "2.0",
+			"id": null,
+			"error": {
+				"code": -32603,
+				"message": "custom error",
+				"data": null
+			}
 		}`},
 	} {
 		req := httptest.NewRequest("POST", "/", strings.NewReader(c.In))
@@ -126,6 +161,14 @@ func TestJSONRPC(t *testing.T) {
 }
 
 func expectJSON(t *testing.T, in *bytes.Buffer, expected string) {
+	if expected == "" {
+		got := in.String()
+		if got != "" {
+			t.Fatalf("expected no response, got: %s", got)
+		}
+		return
+	}
+
 	var buf bytes.Buffer
 	if err := json.Compact(&buf, []byte(expected)); err != nil {
 		t.Fatal(err, expected)
@@ -179,6 +222,12 @@ func TestAlternateEncoder(t *testing.T) {
 			"jsonrpc": "2.0",
 			"method": "foo",
 			"params": null
+		}`, ``, h},
+		{`{
+			"jsonrpc": "2.0",
+			"id": null,
+			"method": "foo",
+			"params": null
 		}`, `{
 			"jsonrpc": "2.0",
 			"id": null,
@@ -186,6 +235,7 @@ func TestAlternateEncoder(t *testing.T) {
 		}`, h},
 		{`{
 			"jsonrpc": "2.0",
+			"id": null,
 			"method": "bar",
 			"params": null
 		}`, `{
@@ -195,6 +245,7 @@ func TestAlternateEncoder(t *testing.T) {
 		}`, h},
 		{`{
 			"jsonrpc": "2.0",
+			"id": null,
 			"method": "foo",
 			"params": null
 		}`, `{
@@ -234,6 +285,11 @@ func TestBidirectional(t *testing.T) {
 			"id": 2,
 			"method": "Echoer.DelayEcho",
 			"params": ["Hello world!", 100]
+		}`))
+		pw.Write([]byte(`{
+			"jsonrpc": "2.0",
+			"method": "Echoer.Echo",
+			"params": ["Notification"]
 		}`))
 		pw.Close()
 	}()
