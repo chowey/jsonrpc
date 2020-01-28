@@ -1,6 +1,7 @@
 # jsonrpc
 
 [![GoDoc](https://godoc.org/github.com/chowey/jsonrpc?status.svg)](https://godoc.org/github.com/chowey/jsonrpc)
+![Go](https://github.com/chowey/jsonrpc/workflows/Go/badge.svg)
 
 Standards-compliant JSON-RPC 2.0 over HTTP for Go.
 
