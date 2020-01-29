@@ -49,6 +49,10 @@ func TestJSONRPC(t *testing.T) {
 	h.RegisterMethod("error", func(s string) error {
 		return errors.New(s)
 	})
+	h.RegisterMethod("prefixecho", func(prefix string, s ...string) string {
+		return prefix + strings.Join(s, " ")
+	})
+	h.RegisterMethod("chan", func(c chan int) {})
 
 	// Prepare test cases.
 	type compare struct {
@@ -70,15 +74,6 @@ func TestJSONRPC(t *testing.T) {
 			"jsonrpc": "2.0",
 			"id": null,
 			"result": "Hello world!"
-		}`},
-		{``, `{
-			"jsonrpc": "2.0",
-			"id": null,
-			"error": {
-				"code": -32600,
-				"message": "EOF",
-				"data": null
-			}
 		}`},
 		{`{
 			"jsonrpc": "2.0",
@@ -139,6 +134,100 @@ func TestJSONRPC(t *testing.T) {
 				"code": -32603,
 				"message": "custom error",
 				"data": null
+			}
+		}`},
+
+		// Test error cases.
+		{``, `{
+			"jsonrpc": "2.0",
+			"id": null,
+			"error": {
+				"code": -32600,
+				"message": "EOF",
+				"data": null
+			}
+		}`},
+		{`{
+			jsonrpc: "2.0",
+			id: null,
+			method: "echo",
+			params: "Hello world!"
+		}`, `{
+			"jsonrpc": "2.0",
+			"id": null,
+			"error": {
+				"code": -32700,
+				"message": "invalid character 'j' looking for beginning of object key string",
+				"data": null
+			}
+		}`},
+		{`{
+			"jsonrpc": "2.0",
+			"id": null,
+			"method": "unknown"
+		}`, `{
+			"jsonrpc": "2.0",
+			"id": null,
+			"error": {
+				"code": -32601,
+				"message": "No such method: unknown",
+				"data": null
+			}
+		}`},
+		{`{
+			"jsonrpc": "1.0",
+			"id": null,
+			"method": "echo",
+			"params": "Hello world!"
+		}`, `{
+			"jsonrpc": "2.0",
+			"id": null,
+			"error": {
+				"code": -32600,
+				"message": "Invalid protocol: expected jsonrpc: 2.0",
+				"data": null
+			}
+		}`},
+		{`{
+			"jsonrpc": "2.0",
+			"id": null,
+			"method": "echo",
+			"params": ["Hello", "world!"]
+		}`, `{
+			"jsonrpc": "2.0",
+			"id": null,
+			"error": {
+				"code": -32602,
+				"message": "echo: require 1 params",
+				"data": null
+			}
+		}`},
+		{`{
+			"jsonrpc": "2.0",
+			"id": null,
+			"method": "prefixecho",
+			"params": []
+		}`, `{
+			"jsonrpc": "2.0",
+			"id": null,
+			"error": {
+				"code": -32602,
+				"message": "prefixecho: require at least 1 params",
+				"data": null
+			}
+		}`},
+		{`{
+			"jsonrpc": "2.0",
+			"id": null,
+			"method": "chan",
+			"params": "Hello world!"
+		}`, `{
+			"jsonrpc": "2.0",
+			"id": null,
+			"error": {
+				"code": -32602,
+				"message": "chan: json: cannot unmarshal string into Go value of type chan int",
+				"data": "Hello world!"
 			}
 		}`},
 	} {
@@ -300,12 +389,19 @@ func TestBidirectional(t *testing.T) {
 			"method": "Echoer.Echo",
 			"params": ["Notification"]
 		}`))
+		pw.Write([]byte(`{
+			"jsonrpc": "2.0",
+			"id": null,
+			"method": "error",
+			"params": ["Error"]
+		}`))
 		pw.Close()
 	}()
 	h.ServeConn(context.Background(), stream)
 
 	got := buf.String()
-	want := `{"jsonrpc":"2.0","id":2,"result":"Hello world!"}
+	want := `{"jsonrpc":"2.0","id":null,"error":{"code":-32601,"message":"No such method: error","data":null}}
+{"jsonrpc":"2.0","id":2,"result":"Hello world!"}
 {"jsonrpc":"2.0","id":1,"result":"Hello world!"}
 `
 	if got != want {
