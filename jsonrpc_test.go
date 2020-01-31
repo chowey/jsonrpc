@@ -407,4 +407,29 @@ func TestBidirectional(t *testing.T) {
 	if got != want {
 		t.Fatalf("expected: %s\ngot: %s", want, got)
 	}
+
+	// Ensure parse errors don't result in infinite loops.
+	buf.Reset()
+	pr, pw = io.Pipe()
+	stream = struct {
+		io.Reader
+		io.Writer
+	}{pr, &buf}
+
+	go func() {
+		_, err := pw.Write([]byte(`[object Object]`))
+		pw.CloseWithError(err)
+	}()
+
+	completion := make(chan struct{})
+	go func() {
+		h.ServeConn(context.Background(), stream)
+		close(completion)
+	}()
+
+	select {
+	case <-time.NewTimer(time.Second).C:
+		t.Fatal("Parse error did not complete")
+	case <-completion:
+	}
 }

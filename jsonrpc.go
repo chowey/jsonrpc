@@ -230,7 +230,10 @@ func (h *Handler) ServeConn(ctx context.Context, rw io.ReadWriter) {
 	for {
 		req := new(request)
 		if !h.decodeRequest(dec, req) {
-			// If no more values are available, the reader has closed.
+			if req.res.errorResponse.Error != nil && req.res.errorResponse.ID != nil {
+				enc.Encode(req.res.errorResponse)
+			}
+			// No more values are available.
 			wg.Wait()
 			return
 		}
@@ -290,7 +293,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	enc := h.newEncoder(w)
 
 	var req request
-	if !h.decodeRequest(dec, &req) {
+	if !h.decodeRequest(dec, &req) && req.res.errorResponse.Error == nil {
 		req.res.ID = jsonrpcID("null")
 		req.res.errorResponse.Error = &Error{
 			Code:    StatusInvalidRequest,
@@ -315,8 +318,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // Decode a value into the request. If there was an error, the errorResponse
-// will be non-nil. If no more values are available on the decoder, then ok
-// will be false.
+// will be non-nil. Returns false if there are no more values available from
+// the decoder.
 func (h *Handler) decodeRequest(dec *json.Decoder, req *request) bool {
 	req.res.Protocol = "2.0"
 
@@ -331,7 +334,7 @@ func (h *Handler) decodeRequest(dec *json.Decoder, req *request) bool {
 				Code:    StatusParseError,
 				Message: err.Error(),
 			}
-			return true
+			return false
 		}
 		req.res.errorResponse.Error = &Error{
 			Code:    StatusInvalidRequest,
