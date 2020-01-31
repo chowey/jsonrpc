@@ -343,11 +343,12 @@ func (h *Handler) decodeRequest(dec *json.Decoder, req *request) bool {
 			}
 			return false
 		}
+		// There was some other read error.
 		req.res.Error = &Error{
 			Code:    StatusInvalidRequest,
 			Message: err.Error(),
 		}
-		return true
+		return false
 	}
 
 	req.res.ID = req.ID

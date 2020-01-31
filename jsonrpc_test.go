@@ -362,6 +362,71 @@ func TestAlternateEncoder(t *testing.T) {
 }
 
 func TestBidirectional(t *testing.T) {
+	t.Log("Running bidirectional test: out-of-sequence responses")
+	testBidirectional(t,
+		func(pw *io.PipeWriter) {
+			pw.Write([]byte(`{
+				"jsonrpc": "2.0",
+				"id": 1,
+				"method": "Echoer.DelayEcho",
+				"params": ["Hello world!", 200]
+			}`))
+			pw.Write([]byte(`{
+				"jsonrpc": "2.0",
+				"id": 2,
+				"method": "Echoer.DelayEcho",
+				"params": ["Hello world!", 100]
+			}`))
+			pw.Write([]byte(`{
+				"jsonrpc": "2.0",
+				"method": "Echoer.Echo",
+				"params": ["Notification"]
+			}`))
+			pw.Write([]byte(`{
+				"jsonrpc": "2.0",
+				"id": null,
+				"method": "error",
+				"params": ["Error"]
+			}`))
+			pw.Close()
+		},
+		`{"jsonrpc":"2.0","id":null,"error":{"code":-32601,"message":"No such method: error","data":null}}
+{"jsonrpc":"2.0","id":2,"result":"Hello world!"}
+{"jsonrpc":"2.0","id":1,"result":"Hello world!"}
+`,
+	)
+
+	// Ensure parse errors don't result in infinite loops.
+	t.Log("Running bidirectional test: parse error")
+	testBidirectional(t,
+		func(pw *io.PipeWriter) {
+			_, err := pw.Write([]byte(`[object Object]`))
+			pw.CloseWithError(err)
+		},
+		`{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"invalid character 'o' looking for beginning of value","data":null}}
+`,
+	)
+
+	// Ensure additional errors from input will terminate.
+	t.Log("Running bidirectional test: unexpected error")
+	testBidirectional(t,
+		func(pw *io.PipeWriter) {
+			pw.Write([]byte(`{
+				"jsonrpc": "2.0",
+				"id": null,
+				"method": "Echoer.Echo",
+				"params": ["Notification"]
+			}`))
+			time.Sleep(100 * time.Millisecond)
+			pw.CloseWithError(errors.New("unexpected error from connection"))
+		},
+		`{"jsonrpc":"2.0","id":null,"result":"Notification"}
+{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"unexpected error from connection","data":null}}
+`,
+	)
+}
+
+func testBidirectional(t *testing.T, writer func(pw *io.PipeWriter), expected string) {
 	h := NewHandler(Echoer{})
 
 	var buf bytes.Buffer
@@ -371,55 +436,7 @@ func TestBidirectional(t *testing.T) {
 		io.Writer
 	}{pr, &buf}
 
-	go func() {
-		pw.Write([]byte(`{
-			"jsonrpc": "2.0",
-			"id": 1,
-			"method": "Echoer.DelayEcho",
-			"params": ["Hello world!", 200]
-		}`))
-		pw.Write([]byte(`{
-			"jsonrpc": "2.0",
-			"id": 2,
-			"method": "Echoer.DelayEcho",
-			"params": ["Hello world!", 100]
-		}`))
-		pw.Write([]byte(`{
-			"jsonrpc": "2.0",
-			"method": "Echoer.Echo",
-			"params": ["Notification"]
-		}`))
-		pw.Write([]byte(`{
-			"jsonrpc": "2.0",
-			"id": null,
-			"method": "error",
-			"params": ["Error"]
-		}`))
-		pw.Close()
-	}()
-	h.ServeConn(context.Background(), stream)
-
-	got := buf.String()
-	want := `{"jsonrpc":"2.0","id":null,"error":{"code":-32601,"message":"No such method: error","data":null}}
-{"jsonrpc":"2.0","id":2,"result":"Hello world!"}
-{"jsonrpc":"2.0","id":1,"result":"Hello world!"}
-`
-	if got != want {
-		t.Fatalf("expected: %s\ngot: %s", want, got)
-	}
-
-	// Ensure parse errors don't result in infinite loops.
-	buf.Reset()
-	pr, pw = io.Pipe()
-	stream = struct {
-		io.Reader
-		io.Writer
-	}{pr, &buf}
-
-	go func() {
-		_, err := pw.Write([]byte(`[object Object]`))
-		pw.CloseWithError(err)
-	}()
+	go writer(pw)
 
 	completion := make(chan struct{})
 	go func() {
@@ -429,13 +446,11 @@ func TestBidirectional(t *testing.T) {
 
 	select {
 	case <-time.NewTimer(time.Second).C:
-		t.Fatal("Parse error did not complete")
+		t.Fatal("Bidirectional streamer did not complete")
 	case <-completion:
 		got := buf.String()
-		want := `{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"invalid character 'o' looking for beginning of value","data":null}}
-`
-		if got != want {
-			t.Fatalf("expected: %s\ngot: %s", want, got)
+		if got != expected {
+			t.Fatalf("expected: %s\ngot: %s", expected, got)
 		}
 	}
 }
