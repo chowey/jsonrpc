@@ -227,11 +227,37 @@ func (h *Handler) ServeConn(ctx context.Context, rw io.ReadWriter) {
 	var wg sync.WaitGroup
 	dec := json.NewDecoder(rw)
 	enc := h.newEncoder(&buf)
+	send := func(res *response) {
+		// Write the entire buffer as a single write, to help e.g. a
+		// websocket adapter send it as one frame.
+		l.Lock()
+		defer l.Unlock()
+
+		var err error
+		if res.Error != nil {
+			err = enc.Encode(res.errorResponse)
+		} else {
+			err = enc.Encode(res)
+		}
+		if err == nil {
+			_, err = buf.WriteTo(rw)
+			buf.Reset()
+		}
+
+		// If write fails, the writer is no longer valid.
+		if err != nil {
+			cancel()
+		}
+	}
+
 	for {
 		req := new(request)
 		if !h.decodeRequest(dec, req) {
-			if req.res.errorResponse.Error != nil && req.res.errorResponse.ID != nil {
-				enc.Encode(req.res.errorResponse)
+			if req.res.Error != nil {
+				// Errors will only occur for parse errors, in which case we
+				// cannot tell if the request was a notification and the client
+				// is not expecting a response. Send the error just to be safe.
+				send(&req.res)
 			}
 			// No more values are available.
 			wg.Wait()
@@ -243,7 +269,7 @@ func (h *Handler) ServeConn(ctx context.Context, rw io.ReadWriter) {
 		go func() {
 			defer wg.Done()
 
-			if req.res.errorResponse.Error == nil {
+			if req.res.Error == nil {
 				// Call the method.
 				req.call(ctx)
 			}
@@ -252,26 +278,7 @@ func (h *Handler) ServeConn(ctx context.Context, rw io.ReadWriter) {
 				return
 			}
 
-			// Write the entire buffer as a single write, to help e.g. a
-			// websocket adapter send it as one frame.
-			l.Lock()
-			defer l.Unlock()
-
-			var err error
-			if req.res.errorResponse.Error != nil {
-				err = enc.Encode(req.res.errorResponse)
-			} else {
-				err = enc.Encode(req.res)
-			}
-			if err == nil {
-				_, err = buf.WriteTo(rw)
-				buf.Reset()
-			}
-
-			// If write fails, the writer is no longer valid.
-			if err != nil {
-				cancel()
-			}
+			send(&req.res)
 		}()
 	}
 }
@@ -293,14 +300,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	enc := h.newEncoder(w)
 
 	var req request
-	if !h.decodeRequest(dec, &req) && req.res.errorResponse.Error == nil {
+	if !h.decodeRequest(dec, &req) && req.res.Error == nil {
 		req.res.ID = jsonrpcID("null")
-		req.res.errorResponse.Error = &Error{
+		req.res.Error = &Error{
 			Code:    StatusInvalidRequest,
 			Message: io.EOF.Error(),
 		}
 	}
-	if req.res.errorResponse.Error == nil {
+	if req.res.Error == nil {
 		// Call the method.
 		req.call(r.Context())
 	}
@@ -309,7 +316,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	} else {
 		w.Header().Set("Content-Type", "application/json")
-		if req.res.errorResponse.Error != nil {
+		if req.res.Error != nil {
 			enc.Encode(req.res.errorResponse)
 		} else {
 			enc.Encode(req.res)
@@ -330,13 +337,13 @@ func (h *Handler) decodeRequest(dec *json.Decoder, req *request) bool {
 		}
 		req.res.ID = jsonrpcID("null")
 		if _, ok := err.(*json.SyntaxError); ok {
-			req.res.errorResponse.Error = &Error{
+			req.res.Error = &Error{
 				Code:    StatusParseError,
 				Message: err.Error(),
 			}
 			return false
 		}
-		req.res.errorResponse.Error = &Error{
+		req.res.Error = &Error{
 			Code:    StatusInvalidRequest,
 			Message: err.Error(),
 		}
@@ -345,7 +352,7 @@ func (h *Handler) decodeRequest(dec *json.Decoder, req *request) bool {
 
 	req.res.ID = req.ID
 	if req.Protocol != "2.0" {
-		req.res.errorResponse.Error = &Error{
+		req.res.Error = &Error{
 			Code:    StatusInvalidRequest,
 			Message: "Invalid protocol: expected jsonrpc: 2.0",
 		}
@@ -354,7 +361,7 @@ func (h *Handler) decodeRequest(dec *json.Decoder, req *request) bool {
 
 	m, ok := h.registry[req.Method]
 	if !ok {
-		req.res.errorResponse.Error = &Error{
+		req.res.Error = &Error{
 			Code:    StatusMethodNotFound,
 			Message: fmt.Sprintf("No such method: %s", req.Method),
 		}

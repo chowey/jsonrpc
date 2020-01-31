@@ -431,5 +431,11 @@ func TestBidirectional(t *testing.T) {
 	case <-time.NewTimer(time.Second).C:
 		t.Fatal("Parse error did not complete")
 	case <-completion:
+		got := buf.String()
+		want := `{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"invalid character 'o' looking for beginning of value","data":null}}
+`
+		if got != want {
+			t.Fatalf("expected: %s\ngot: %s", want, got)
+		}
 	}
 }
