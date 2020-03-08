@@ -204,8 +204,18 @@ func (h *Handler) RegisterMethod(name string, fn interface{}) {
 // pattern "Type.Method".
 func (h *Handler) Register(rcvr interface{}) {
 	v := reflect.ValueOf(rcvr)
-	t := reflect.TypeOf(rcvr)
 	name := reflect.Indirect(v).Type().Name()
+	h.registerName(name, v)
+}
+
+// RegisterName is like Register but uses the provided name for the type instead
+// of the receiver's concrete type.
+func (h *Handler) RegisterName(name string, rcvr interface{}) {
+	h.registerName(name, reflect.ValueOf(rcvr))
+}
+
+func (h *Handler) registerName(name string, v reflect.Value) {
+	t := v.Type()
 	for i := 0; i < t.NumMethod(); i++ {
 		method := t.Method(i)
 		// Method must be exported.
