@@ -26,6 +26,37 @@ func (Echoer) DelayEcho(s string, ms int) string {
 	return s
 }
 
+func TestZeroHandler(t *testing.T) {
+	var h Handler
+	// Prepare test cases.
+	type compare struct {
+		In  string
+		Out string
+	}
+	for i, c := range []compare{
+		{`{
+			"jsonrpc": "2.0",
+			"id": null,
+			"method": "unknown"
+		}`, `{
+			"jsonrpc": "2.0",
+			"id": null,
+			"error": {
+				"code": -32601,
+				"message": "No such method: unknown",
+				"data": null
+			}
+		}`},
+	} {
+		req := httptest.NewRequest("POST", "/", strings.NewReader(c.In))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		t.Logf("Running test %d", i)
+		expectJSON(t, w.Body, c.Out)
+	}
+}
+
 func TestJSONRPC(t *testing.T) {
 	ctx := context.WithValue(context.Background(), "data", "Hello world!")
 
@@ -300,11 +331,11 @@ func TestAlternateEncoder(t *testing.T) {
 	})
 
 	h2 := NewHandler()
-	h2.SetEncoderFactory(func(w io.Writer) Encoder {
+	h2.Encoder = func(w io.Writer) Encoder {
 		enc := alt_json.NewEncoder(w)
 		enc.SetNilSafeCollection(true)
 		return enc
-	})
+	}
 	h2.RegisterMethod("foo", func() container {
 		return container{}
 	})

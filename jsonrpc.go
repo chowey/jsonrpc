@@ -167,14 +167,17 @@ func (err *Error) Error() string {
 
 // Handler is an http.Handler that responds to JSON-RPC 2.0 requests.
 type Handler struct {
-	registry       map[string]*method
-	encoderFactory func(w io.Writer) Encoder
+	// Encoder configures what encoder will be used for sending JSON-RPC
+	// responses. By default the Handler will use json.NewEncoder.
+	Encoder func(w io.Writer) Encoder
+
+	registry map[string]*method
 }
 
 // NewHandler initializes a new Handler. If receivers are provided, they will
 // be registered.
 func NewHandler(rcvrs ...interface{}) *Handler {
-	h := &Handler{registry: make(map[string]*method)}
+	h := &Handler{}
 	for _, rcvr := range rcvrs {
 		h.Register(rcvr)
 	}
@@ -195,6 +198,9 @@ func (h *Handler) RegisterMethod(name string, fn interface{}) {
 	m, err := newMethod(name, fn)
 	if err != nil {
 		panic(err)
+	}
+	if h.registry == nil {
+		h.registry = make(map[string]*method)
 	}
 	h.registry[name] = m
 }
@@ -370,29 +376,26 @@ func (h *Handler) decodeRequest(dec *json.Decoder, req *request) bool {
 		return true
 	}
 
-	m, ok := h.registry[req.Method]
-	if !ok {
+	if h.registry != nil {
+		req.m = h.registry[req.Method]
+	}
+
+	if req.m == nil {
 		req.res.Error = &Error{
 			Code:    StatusMethodNotFound,
 			Message: fmt.Sprintf("No such method: %s", req.Method),
 		}
 		return true
 	}
-	req.m = m
+
 	return true
 }
 
 func (h *Handler) newEncoder(w io.Writer) Encoder {
-	if h.encoderFactory == nil {
+	if h.Encoder == nil {
 		return json.NewEncoder(w)
 	}
-	return h.encoderFactory(w)
-}
-
-// SetEncoderFactory configures what encoder will be loaded for sending JSON-RPC
-// responses. By default the Handler will use json.NewEncoder.
-func (h *Handler) SetEncoderFactory(fn func(w io.Writer) Encoder) {
-	h.encoderFactory = fn
+	return h.Encoder(w)
 }
 
 var (
