@@ -71,6 +71,20 @@ const (
 	StatusInternalError  = -32603 // Internal JSON-RPC error.
 )
 
+// Request is unmarshalled before every JSON-RPC call. It contains the raw
+// message and params from the JSON-RPC message.
+type Request struct {
+	Method string
+	Params json.RawMessage
+}
+
+// Response contains the results of a JSON-RPC call, and will be marshalled as a
+// JSON-RPC message.
+type Response struct {
+	Result interface{}
+	Error  *Error
+}
+
 type jsonrpcID []byte
 
 func (m jsonrpcID) MarshalJSON() ([]byte, error) {
@@ -96,7 +110,7 @@ func (m *jsonrpcID) UnmarshalJSON(data []byte) error {
 	case float64:
 	case nil:
 	default:
-		// Other types are not allowed for JSONRPC IDs.
+		// Other types are not allowed for JSON-RPC IDs.
 		return fmt.Errorf("\"id\" is not a valid type: %s", data)
 	}
 
@@ -121,12 +135,12 @@ func (req *request) call(ctx context.Context) {
 	// Call the method.
 	result, err := req.m.call(ctx, req.Params)
 	if err != nil {
-		// Check for pre-existing JSONRPC errors.
+		// Check for pre-existing JSON-RPC errors.
 		if e, ok := err.(*Error); ok && e != nil {
 			req.res.Error = e
 			return
 		}
-		// Create a generic JSONRPC error.
+		// Create a generic JSON-RPC error.
 		req.res.Error = &Error{
 			Code:    StatusInternalError,
 			Message: err.Error(),
@@ -170,6 +184,23 @@ type Handler struct {
 	// Encoder configures what encoder will be used for sending JSON-RPC
 	// responses. By default the Handler will use json.NewEncoder.
 	Encoder func(w io.Writer) Encoder
+
+	// RequestInterceptor, if specified, will be called after the JSON-RPC
+	// message is parsed but before the method is called. The Request may be
+	// modified.
+	//
+	// This can be used, for example, to perform handler-wide validation.
+	//
+	// If an error is returned, the method is never called and that error will
+	// be sent to the client instead.
+	RequestInterceptor func(ctx context.Context, req *Request) error
+
+	// ResponseInterceptor, if specified, will be called after the method is
+	// called but before the response is sent to the client. The Response may
+	// be modified.
+	//
+	// If an error is returned, that error will be sent to the client instead.
+	ResponseInterceptor func(ctx context.Context, req Request, res *Response) error
 
 	registry map[string]*method
 }
@@ -268,7 +299,7 @@ func (h *Handler) ServeConn(ctx context.Context, rw io.ReadWriter) {
 
 	for {
 		req := new(request)
-		if !h.decodeRequest(dec, req) {
+		if !h.decodeRequest(ctx, dec, req) {
 			if req.res.Error != nil {
 				// Errors will only occur for parse errors, in which case we
 				// cannot tell if the request was a notification and the client
@@ -290,6 +321,8 @@ func (h *Handler) ServeConn(ctx context.Context, rw io.ReadWriter) {
 				req.call(ctx)
 			}
 
+			h.interceptResponse(ctx, req)
+
 			if req.res.ID == nil {
 				return
 			}
@@ -310,13 +343,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// All other requests return status OK. Errors are returned as JSONRPC.
+	// All other requests return status OK. Errors are returned as JSON-RPC.
 
+	ctx := r.Context()
 	dec := json.NewDecoder(r.Body)
 	enc := h.newEncoder(w)
 
 	var req request
-	if !h.decodeRequest(dec, &req) && req.res.Error == nil {
+	if !h.decodeRequest(ctx, dec, &req) && req.res.Error == nil {
 		req.res.ID = jsonrpcID("null")
 		req.res.Error = &Error{
 			Code:    StatusInvalidRequest,
@@ -325,8 +359,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.res.Error == nil {
 		// Call the method.
-		req.call(r.Context())
+		req.call(ctx)
 	}
+
+	h.interceptResponse(ctx, &req)
 
 	if req.res.ID == nil {
 		w.WriteHeader(http.StatusNoContent)
@@ -340,10 +376,51 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (h *Handler) interceptRequest(ctx context.Context, req *request) {
+	if h.RequestInterceptor == nil {
+		return
+	}
+
+	header := Request{Method: req.Method, Params: req.Params}
+	if err := h.RequestInterceptor(ctx, &header); err != nil {
+		e, ok := err.(*Error)
+		if !ok {
+			e = &Error{
+				Code:    StatusInternalError,
+				Message: err.Error(),
+			}
+		}
+		req.res.Error = e
+		return
+	}
+	req.Method, req.Params = header.Method, header.Params
+}
+
+func (h *Handler) interceptResponse(ctx context.Context, req *request) {
+	if h.ResponseInterceptor == nil {
+		return
+	}
+
+	header := Request{Method: req.Method, Params: req.Params}
+	message := Response{Result: req.res.Result, Error: req.res.Error}
+	if err := h.ResponseInterceptor(ctx, header, &message); err != nil {
+		e, ok := err.(*Error)
+		if !ok {
+			e = &Error{
+				Code:    StatusInternalError,
+				Message: err.Error(),
+			}
+		}
+		req.res.Error = e
+		return
+	}
+	req.res.Result, req.res.Error = message.Result, message.Error
+}
+
 // Decode a value into the request. If there was an error, the errorResponse
 // will be non-nil. Returns false if there are no more values available from
 // the decoder.
-func (h *Handler) decodeRequest(dec *json.Decoder, req *request) bool {
+func (h *Handler) decodeRequest(ctx context.Context, dec *json.Decoder, req *request) bool {
 	req.res.Protocol = "2.0"
 
 	// Unmarshal the request. We do all the usual checks per the protocol.
@@ -373,6 +450,11 @@ func (h *Handler) decodeRequest(dec *json.Decoder, req *request) bool {
 			Code:    StatusInvalidRequest,
 			Message: "Invalid protocol: expected jsonrpc: 2.0",
 		}
+		return true
+	}
+
+	h.interceptRequest(ctx, req)
+	if req.res.Error != nil {
 		return true
 	}
 

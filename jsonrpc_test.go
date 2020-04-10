@@ -485,3 +485,102 @@ func testBidirectional(t *testing.T, writer func(pw *io.PipeWriter), expected st
 		}
 	}
 }
+
+func TestRequestInterceptor(t *testing.T) {
+	h := NewHandler(&Echoer{})
+	h.RequestInterceptor = func(ctx context.Context, req *Request) error {
+		if req.Method == "Echoer.DelayEcho" {
+			return errors.New("forbidden")
+		}
+		return nil
+	}
+	// Prepare test cases.
+	type compare struct {
+		In  string
+		Out string
+	}
+	for i, c := range []compare{
+		{`{
+			"jsonrpc": "2.0",
+			"id": null,
+			"method": "Echoer.Echo",
+			"params": "Hello world!"
+		}`, `{
+			"jsonrpc": "2.0",
+			"id": null,
+			"result": "Hello world!"
+		}`},
+		{`{
+			"jsonrpc": "2.0",
+			"id": null,
+			"method": "Echoer.DelayEcho",
+			"params": ["Hello world!", 200]
+		}`, `{
+			"jsonrpc": "2.0",
+			"id": null,
+			"error": {
+				"code": -32603,
+				"message": "forbidden",
+				"data": null
+			}
+		}`},
+	} {
+		req := httptest.NewRequest("POST", "/", strings.NewReader(c.In))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		t.Logf("Running test %d", i)
+		expectJSON(t, w.Body, c.Out)
+	}
+}
+
+func TestResponseInterceptor(t *testing.T) {
+	h := NewHandler(&Echoer{})
+	h.ResponseInterceptor = func(ctx context.Context, req Request, res *Response) error {
+		if req.Method == "Echoer.DelayEcho" {
+			res.Error = &Error{
+				Code:    403,
+				Message: "forbidden",
+			}
+		}
+		return nil
+	}
+	// Prepare test cases.
+	type compare struct {
+		In  string
+		Out string
+	}
+	for i, c := range []compare{
+		{`{
+			"jsonrpc": "2.0",
+			"id": null,
+			"method": "Echoer.Echo",
+			"params": "Hello world!"
+		}`, `{
+			"jsonrpc": "2.0",
+			"id": null,
+			"result": "Hello world!"
+		}`},
+		{`{
+			"jsonrpc": "2.0",
+			"id": null,
+			"method": "Echoer.DelayEcho",
+			"params": ["Hello world!", 200]
+		}`, `{
+			"jsonrpc": "2.0",
+			"id": null,
+			"error": {
+				"code": 403,
+				"message": "forbidden",
+				"data": null
+			}
+		}`},
+	} {
+		req := httptest.NewRequest("POST", "/", strings.NewReader(c.In))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		t.Logf("Running test %d", i)
+		expectJSON(t, w.Body, c.Out)
+	}
+}
