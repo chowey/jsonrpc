@@ -141,10 +141,7 @@ func (req *request) call(ctx context.Context) {
 			return
 		}
 		// Create a generic JSON-RPC error.
-		req.res.Error = &Error{
-			Code:    StatusInternalError,
-			Message: err.Error(),
-		}
+		req.res.Error = WrapError(err)
 		return
 	}
 	req.res.Result = result
@@ -170,13 +167,32 @@ type Encoder interface {
 // Error represents a JSON-RPC 2.0 error. If an Error is returned from a
 // registered function, it will be sent directly to the client.
 type Error struct {
-	Code    int         `json:"code"`
-	Message string      `json:"message"`
-	Data    interface{} `json:"data"`
+	Code     int         `json:"code"`
+	Message  string      `json:"message"`
+	Data     interface{} `json:"data"`
+	original error
+}
+
+// WrapError creates a JSON-RPC Error by wrapping an underlying error, with
+// StatusInternalError by default. If the wrapped error is also a JSON-RPC
+// error, then it is preserved.
+func WrapError(err error) *Error {
+	if e, ok := err.(*Error); ok && e != nil {
+		return e
+	}
+	return &Error{
+		Code:     StatusInternalError,
+		Message:  err.Error(),
+		original: err,
+	}
 }
 
 func (err *Error) Error() string {
 	return err.Message
+}
+
+func (err *Error) Unwrap() error {
+	return err.original
 }
 
 // Handler is an http.Handler that responds to JSON-RPC 2.0 requests.
@@ -352,10 +368,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var req request
 	if !h.decodeRequest(ctx, dec, &req) && req.res.Error == nil {
 		req.res.ID = jsonrpcID("null")
-		req.res.Error = &Error{
-			Code:    StatusInvalidRequest,
-			Message: io.EOF.Error(),
-		}
+		req.res.Error = WrapError(io.EOF)
+		req.res.Error.Code = StatusInvalidRequest
 	}
 	if req.res.Error == nil {
 		// Call the method.
@@ -385,10 +399,7 @@ func (h *Handler) interceptRequest(ctx context.Context, req *request) {
 	if err := h.RequestInterceptor(ctx, &header); err != nil {
 		e, ok := err.(*Error)
 		if !ok {
-			e = &Error{
-				Code:    StatusInternalError,
-				Message: err.Error(),
-			}
+			e = WrapError(err)
 		}
 		req.res.Error = e
 		return
@@ -404,14 +415,7 @@ func (h *Handler) interceptResponse(ctx context.Context, req *request) {
 	header := Request{Method: req.Method, Params: req.Params}
 	message := Response{Result: req.res.Result, Error: req.res.Error}
 	if err := h.ResponseInterceptor(ctx, header, &message); err != nil {
-		e, ok := err.(*Error)
-		if !ok {
-			e = &Error{
-				Code:    StatusInternalError,
-				Message: err.Error(),
-			}
-		}
-		req.res.Error = e
+		req.res.Error = WrapError(err)
 		return
 	}
 	req.res.Result, req.res.Error = message.Result, message.Error
@@ -430,17 +434,13 @@ func (h *Handler) decodeRequest(ctx context.Context, dec *json.Decoder, req *req
 		}
 		req.res.ID = jsonrpcID("null")
 		if _, ok := err.(*json.SyntaxError); ok {
-			req.res.Error = &Error{
-				Code:    StatusParseError,
-				Message: err.Error(),
-			}
+			req.res.Error = WrapError(err)
+			req.res.Error.Code = StatusParseError
 			return false
 		}
 		// There was some other read error.
-		req.res.Error = &Error{
-			Code:    StatusInvalidRequest,
-			Message: err.Error(),
-		}
+		req.res.Error = WrapError(err)
+		req.res.Error.Code = StatusInvalidRequest
 		return false
 	}
 
@@ -594,11 +594,10 @@ func (m *method) call(ctx context.Context, params json.RawMessage) (result inter
 		}
 		v := reflect.New(t)
 		if err := json.Unmarshal(args[i], v.Interface()); err != nil {
-			return nil, &Error{
-				Code:    StatusInvalidParams,
-				Message: fmt.Sprintf("%s: %v", m.name, err),
-				Data:    args[i],
-			}
+			e := WrapError(fmt.Errorf("%s: %w", m.name, err))
+			e.Code = StatusInvalidParams
+			e.Data = args[i]
+			return nil, e
 		}
 		provided[i] = v.Elem()
 	}
