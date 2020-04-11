@@ -350,7 +350,7 @@ func (h *Handler) ServeConn(ctx context.Context, rw io.ReadWriter) {
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Deal with HTTP-level errors.
-	if r.Header.Get("Content-Type") != "application/json" {
+	if ct, ok := r.Header["Content-Type"]; ok && len(ct) > 0 && ct[0] != "application/json" {
 		http.Error(w, "Unsupported Content-Type: must be application/json", http.StatusUnsupportedMediaType)
 		return
 	}
